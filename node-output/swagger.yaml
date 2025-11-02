@@ -1,43 +1,28 @@
-openapi: 3.0.0
+openapi: 3.0.3
 info:
-  title: Simple Inventory API
-  description: This is a simple API
-  contact:
-    email: you@your-company.com
-  license:
-    name: Apache 2.0
-    url: http://www.apache.org/licenses/LICENSE-2.0.html
+  title: Rutas de Resúmenes (Fragmento DOF)
+  description: |
+    Este archivo es un fragmento de la especificación principal del DOF, enfocado
+    exclusivamente en las rutas para la gestión de resúmenes generados automáticamente.
   version: 1.0.0
 servers:
 - url: https://virtserver.swaggerhub.com/tecnologicodemonterr-61b/DOD/1.0.0
   description: SwaggerHub API Auto Mocking
 tags:
-- name: admins
-  description: Secured Admin-only calls
-- name: developers
-  description: Operations available to regular developers
+- name: Procesamiento
+  description: Rutas relacionadas con la ejecución de tareas de análisis y resumen
+    automático.
 paths:
-  /inventory:
+  /summaries:
     get:
       tags:
-      - developers
-      summary: searches inventory
-      description: |
-        By passing in the appropriate options, you can search for
-        available inventory in the system
-      operationId: searchInventory
+      - Procesamiento
+      summary: Obtener lista de resúmenes generados
+      operationId: getSummaries
       parameters:
-      - name: searchString
-        in: query
-        description: pass an optional search string for looking up inventory
-        required: false
-        style: form
-        explode: true
-        schema:
-          type: string
       - name: skip
         in: query
-        description: number of records to skip for pagination
+        description: Número de registros a omitir para la paginación (offset).
         required: false
         style: form
         explode: true
@@ -45,114 +30,98 @@ paths:
           minimum: 0
           type: integer
           format: int32
+          default: 0
       - name: limit
         in: query
-        description: maximum number of records to return
+        description: Número máximo de registros a retornar (tamaño de la página).
         required: false
         style: form
         explode: true
         schema:
-          maximum: 50
-          minimum: 0
+          maximum: 100
+          minimum: 1
           type: integer
           format: int32
+          default: 25
       responses:
         "200":
-          description: search results matching criteria
+          description: Lista de resúmenes retornada exitosamente.
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: "#/components/schemas/InventoryItem"
-        "400":
-          description: bad input parameter
+                  $ref: "#/components/schemas/Summary"
+        "401":
+          description: Acceso no autorizado. Falta el token de autenticación o es
+            inválido.
+  /summaries/{summaryId}:
+    get:
+      tags:
+      - Procesamiento
+      summary: Obtener un resumen por ID
+      operationId: getSummaryById
+      parameters:
+      - name: summaryId
+        in: path
+        required: true
+        style: simple
+        explode: false
+        schema:
+          type: integer
+      responses:
+        "200":
+          description: Resumen retornado.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Summary"
+        "401":
+          description: Acceso no autorizado. Falta el token de autenticación o es
+            inválido.
+        "404":
+          description: Recurso no encontrado. El ID proporcionado no existe.
+    delete:
+      tags:
+      - Procesamiento
+      summary: Eliminar un resumen por ID
+      operationId: deleteSummary
+      parameters:
+      - name: summaryId
+        in: path
+        required: true
+        style: simple
+        explode: false
+        schema:
+          type: integer
+      responses:
+        "204":
+          description: Resumen eliminado correctamente.
+        "401":
+          description: Acceso no autorizado. Falta el token de autenticación o es
+            inválido.
+        "404":
+          description: Recurso no encontrado. El ID proporcionado no existe.
 components:
   schemas:
-    Schema:
-      title: Summaries
+    Summary:
+      required:
+      - id
+      - summary_text
       type: object
       properties:
-        table_name:
+        id:
+          type: integer
+          description: Identificador único del resumen.
+        summary_text:
           type: string
-        description:
-          type: string
-        columns:
-          type: array
-          items:
-            $ref: "#/components/schemas/Schema_columns"
-      description: "Tabla para almacenar resúmenes generados automáticamente de objetos\
-        \ del proyecto (publicaciones, secciones, ítems o fragmentos) junto con su\
-        \ modelo, idioma y nivel de confianza."
-      x-examples:
-        Example 1:
-          table_name: summaries
-          description: "Tabla para almacenar resúmenes generados automáticamente de\
-            \ objetos del proyecto (publicaciones, secciones, ítems o fragmentos)\
-            \ junto con su modelo, idioma y nivel de confianza."
-          columns:
-          - name: id
-            type: INT
-            constraints:
-            - PRIMARY KEY
-            - AUTO_INCREMENT
-            description: Identificador único del resumen.
-          - name: object_type
-            type: "ENUM('publication', 'section', 'item', 'chunk')"
-            constraints:
-            - NOT NULL
-            description: "Tipo de objeto al que pertenece el resumen (ejemplo: publicació\
-              n, sección, ítem o fragmento de texto)."
-          - name: object_id
-            type: BIGINT
-            constraints:
-            - NOT NULL
-            description: Identificador del objeto original en su tabla correspondiente.
-          - name: model
-            type: VARCHAR(100)
-            constraints:
-            - NOT NULL
-            description: "Nombre del modelo de lenguaje utilizado para generar el\
-              \ resumen (por ejemplo, 'GPT-5', 'Watsonx.ai')."
-          - name: model_version
-            type: VARCHAR(50)
-            constraints: []
-            description: Versión específica del modelo empleado.
-          - name: lang
-            type: VARCHAR(10)
-            default: '''es'''
-            description: Código ISO del idioma en el que fue generado el resumen (por
-              defecto 'es').
-          - name: summary_text
-            type: TEXT
-            constraints: []
-            description: Contenido textual del resumen generado.
-          - name: confidence
-            type: "DECIMAL(5,2)"
-            constraints: []
-            description: "Nivel de confianza asociado al resumen, expresado entre\
-              \ 0.00 y 1.00 o en porcentaje."
-          - name: created_at
-            type: TIMESTAMP
-            default: CURRENT_TIMESTAMP
-            description: Fecha y hora de creación del resumen.
-          - name: created_by
-            type: VARCHAR(100)
-            constraints: []
-            description: "Nombre o ID del usuario, agente o sistema que generó el\
-              \ resumen."
-    Schema_columns:
-      type: object
-      properties:
-        name:
-          type: string
-        type:
-          type: string
-        constraints:
-          type: array
-          items:
-            type: string
-        description:
-          type: string
-        default:
-          type: string
+          description: El texto del resumen generado.
+        confidence:
+          type: number
+          description: Puntuación de confianza del modelo.
+          format: float
+  responses:
+    UnauthorizedError:
+      description: Acceso no autorizado. Falta el token de autenticación o es inválido.
+    NotFoundError:
+      description: Recurso no encontrado. El ID proporcionado no existe.
