@@ -1,0 +1,127 @@
+openapi: 3.0.3
+info:
+  title: Rutas de Resúmenes (Fragmento DOF)
+  description: |
+    Este archivo es un fragmento de la especificación principal del DOF, enfocado
+    exclusivamente en las rutas para la gestión de resúmenes generados automáticamente.
+  version: 1.0.0
+servers:
+- url: https://virtserver.swaggerhub.com/tecnologicodemonterr-61b/DOD/1.0.0
+  description: SwaggerHub API Auto Mocking
+tags:
+- name: Procesamiento
+  description: Rutas relacionadas con la ejecución de tareas de análisis y resumen
+    automático.
+paths:
+  /summaries:
+    get:
+      tags:
+      - Procesamiento
+      summary: Obtener lista de resúmenes generados
+      operationId: getSummaries
+      parameters:
+      - name: skip
+        in: query
+        description: Número de registros a omitir para la paginación (offset).
+        required: false
+        style: form
+        explode: true
+        schema:
+          minimum: 0
+          type: integer
+          format: int32
+          default: 0
+      - name: limit
+        in: query
+        description: Número máximo de registros a retornar (tamaño de la página).
+        required: false
+        style: form
+        explode: true
+        schema:
+          maximum: 100
+          minimum: 1
+          type: integer
+          format: int32
+          default: 25
+      responses:
+        "200":
+          description: Lista de resúmenes retornada exitosamente.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Summary"
+        "401":
+          description: Acceso no autorizado. Falta el token de autenticación o es
+            inválido.
+  /summaries/{summaryId}:
+    get:
+      tags:
+      - Procesamiento
+      summary: Obtener un resumen por ID
+      operationId: getSummaryById
+      parameters:
+      - name: summaryId
+        in: path
+        required: true
+        style: simple
+        explode: false
+        schema:
+          type: integer
+      responses:
+        "200":
+          description: Resumen retornado.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Summary"
+        "401":
+          description: Acceso no autorizado. Falta el token de autenticación o es
+            inválido.
+        "404":
+          description: Recurso no encontrado. El ID proporcionado no existe.
+    delete:
+      tags:
+      - Procesamiento
+      summary: Eliminar un resumen por ID
+      operationId: deleteSummary
+      parameters:
+      - name: summaryId
+        in: path
+        required: true
+        style: simple
+        explode: false
+        schema:
+          type: integer
+      responses:
+        "204":
+          description: Resumen eliminado correctamente.
+        "401":
+          description: Acceso no autorizado. Falta el token de autenticación o es
+            inválido.
+        "404":
+          description: Recurso no encontrado. El ID proporcionado no existe.
+components:
+  schemas:
+    Summary:
+      required:
+      - id
+      - summary_text
+      type: object
+      properties:
+        id:
+          type: integer
+          description: Identificador único del resumen.
+        summary_text:
+          type: string
+          description: El texto del resumen generado.
+        confidence:
+          type: number
+          description: Puntuación de confianza del modelo.
+          format: float
+  responses:
+    UnauthorizedError:
+      description: Acceso no autorizado. Falta el token de autenticación o es inválido.
+    NotFoundError:
+      description: Recurso no encontrado. El ID proporcionado no existe.
