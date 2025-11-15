@@ -5,10 +5,9 @@
 
 import io
 import os
-import zipfile
 import requests
 import mysql.connector
-from flask import Flask, jsonify, send_file, request
+from flask import Flask, jsonify, send_file
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -25,6 +24,9 @@ DB_CONFIG = {
     "port": 3306,
 }
 
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+BASE_PDF_DIR = "DOF_PDF"  # carpeta local con tus PDFs dentro del repo
+
 def get_db_connection():
     try:
         return mysql.connector.connect(**DB_CONFIG)
@@ -33,44 +35,80 @@ def get_db_connection():
         return None
 
 # ----------------------------------------------------------------------
-# Utilidades para resolver/obtener el PDF desde storage_uri o download_uri
+# Utilidades para leer PDF local o vía URL
 # ----------------------------------------------------------------------
-def _fetch_pdf_bytes(storage_uri: str, download_uri: str | None = None) -> bytes:
-    """
-    Intenta obtener el PDF en este orden:
-    1) Si download_uri es http(s), la usa directamente.
-    2) Si storage_uri es http(s), la usa.
-    3) Si storage_uri es una ruta local, la abre localmente.
-    4) Si storage_uri es s3:// y no hay download_uri http(s), devolvemos NotImplemented.
-    """
-    url = download_uri or storage_uri
+def _try_read(path: str) -> bytes | None:
+    """Intenta leer un archivo binario si existe."""
+    if path and os.path.exists(path):
+        with open(path, "rb") as f:
+            return f.read()
+    return None
 
-    # Caso http(s)
-    if isinstance(url, str) and url.lower().startswith(("http://", "https://")):
-        r = requests.get(url, stream=True, timeout=30)
+def _fetch_pdf_bytes(storage_uri: str, public_url: str | None = None) -> bytes:
+    """
+    Orden de resolución:
+    1) Ruta local dentro de DOF_PDF/<storage_uri>
+    2) storage_uri tal cual como ruta absoluta/relativa al proyecto
+    3) public_url http(s)
+    4) storage_uri http(s)
+    5) s3:// -> no implementado sin URL pública
+    """
+    # 1) DOF_PDF/<storage_uri>
+    local_candidate = os.path.join(PROJECT_ROOT, BASE_PDF_DIR, storage_uri)
+    data = _try_read(local_candidate)
+    if data is not None:
+        return data
+
+    # 2) storage_uri como ruta (absoluta o relativa)
+    abs_candidate = storage_uri
+    if not os.path.isabs(abs_candidate):
+        abs_candidate = os.path.join(PROJECT_ROOT, storage_uri)
+    data = _try_read(abs_candidate)
+    if data is not None:
+        return data
+
+    # 3) URL pública explícita
+    if isinstance(public_url, str) and public_url.lower().startswith(("http://", "https://")):
+        r = requests.get(public_url, stream=True, timeout=30)
         r.raise_for_status()
         return r.content
 
-    # Caso ruta local absoluta o relativa
-    if os.path.exists(storage_uri):
-        with open(storage_uri, "rb") as f:
-            return f.read()
+    # 4) storage_uri como URL
+    if isinstance(storage_uri, str) and storage_uri.lower().startswith(("http://", "https://")):
+        r = requests.get(storage_uri, stream=True, timeout=30)
+        r.raise_for_status()
+        return r.content
 
-    # Caso s3://... sin URL pública configurada
+    # 5) s3 sin URL pública
     if isinstance(storage_uri, str) and storage_uri.lower().startswith("s3://"):
         raise NotImplementedError(
-            "storage_uri con esquema s3:// requiere 'download_uri' http(s) o presignado."
+            "storage_uri s3:// requiere URL pública presignada (public_url)."
         )
 
-    # Si nada funcionó
-    raise FileNotFoundError("No fue posible resolver/obtener el PDF desde storage_uri/download_uri.")
+    raise FileNotFoundError(
+        f"No se pudo encontrar el PDF. Revisar storage_uri='{storage_uri}' y carpeta '{BASE_PDF_DIR}/'."
+    )
 
 def _safe_filename(base: str) -> str:
-    # Limpia nombre para descarga
     return "".join(c for c in base if c.isalnum() or c in ("-", "_", ".", " ")).strip() or "document"
 
 # ----------------------------------------------------------------------
-# 1) GET /dof/files  -> lista de archivos + datos básicos de publicación
+# Raíz (índice simple)
+# ----------------------------------------------------------------------
+@app.route("/", methods=["GET"])
+def root():
+    return jsonify({
+        "service": "DOF Files API",
+        "endpoints": [
+            "GET /dof/files",
+            "GET /dof/files/<file_id>",
+            "GET /dof/files/<file_id>/download"
+        ]
+    })
+
+# ----------------------------------------------------------------------
+# 1) GET /dof/files  -> últimas 5 con metadatos
+#    publication_date se deriva del nombre del PDF (04112025-MAT.pdf -> 2025-11-04)
 # ----------------------------------------------------------------------
 @app.route("/dof/files", methods=["GET"])
 def get_files():
@@ -89,16 +127,18 @@ def get_files():
             f.sha256,
             f.has_ocr,
             f.pages_count,
-            p.dof_date   AS publication_date,
+            /* fecha derivada del nombre del PDF: 04112025-MAT.pdf -> 2025-11-04 */
+            DATE_FORMAT(
+              STR_TO_DATE(SUBSTRING_INDEX(f.storage_uri, '-', 1), '%d%m%Y'),
+              '%Y-%m-%d'
+            ) AS publication_date,
             p.type       AS publication_type,
             p.source_url AS source_url
         FROM files f
         JOIN publications p ON f.publication_id = p.id
-        ORDER BY p.dof_date DESC, f.id DESC
+        ORDER BY publication_date DESC, f.id DESC
         LIMIT 5
     """
-    # ^ Si quieres TODA la lista, quita el LIMIT 5. Así tal cual devuelve “las últimas 5 publicaciones”.
-
     try:
         cursor.execute(sql)
         rows = cursor.fetchall()
@@ -112,43 +152,31 @@ def get_files():
         conn.close()
 
 # ----------------------------------------------------------------------
-# 2) GET /dof/files/{file_id} -> detalle de archivo + páginas + resumen
+# 2) GET /dof/files/<id> -> detalle + páginas + resumen (JSON)
 # ----------------------------------------------------------------------
 @app.route("/dof/files/<int:file_id>", methods=["GET"])
 def get_file_detail(file_id):
     conn = get_db_connection()
     if not conn:
         return jsonify({"message": "Error de conexión a la base de datos"}), 500
-
     cursor = conn.cursor(dictionary=True)
 
     try:
-        # Datos del archivo
         cursor.execute(
             """
-            SELECT
-                id,
-                publication_id,
-                storage_uri,
-                mime,
-                has_ocr
+            SELECT id, publication_id, storage_uri, mime, has_ocr
             FROM files
             WHERE id = %s
             """,
             (file_id,),
         )
         file_row = cursor.fetchone()
-
         if not file_row:
             return jsonify({"message": "Archivo DOF no encontrado"}), 404
 
-        # Páginas del archivo
         cursor.execute(
             """
-            SELECT
-                page_no,
-                text,
-                image_uri
+            SELECT page_no, text, image_uri
             FROM pages
             WHERE file_id = %s
             ORDER BY page_no
@@ -157,7 +185,6 @@ def get_file_detail(file_id):
         )
         pages = cursor.fetchall()
 
-        # Resumen opcional desde summaries
         cursor.execute(
             """
             SELECT summary_text
@@ -169,10 +196,10 @@ def get_file_detail(file_id):
             """,
             (file_row["publication_id"],),
         )
-        summary_row = cursor.fetchone()
-        summary_text = summary_row["summary_text"] if summary_row else None
+        srow = cursor.fetchone()
+        summary_text = srow["summary_text"] if srow else None
 
-        result = {
+        return jsonify({
             "id": file_row["id"],
             "publication_id": file_row["publication_id"],
             "storage_uri": file_row["storage_uri"],
@@ -180,9 +207,7 @@ def get_file_detail(file_id):
             "has_ocr": bool(file_row["has_ocr"]),
             "pages": pages,
             "summary": summary_text,
-        }
-
-        return jsonify(result), 200
+        }), 200
 
     except mysql.connector.Error as err:
         return jsonify({"message": f"Error al recuperar archivo DOF: {err}"}), 500
@@ -191,29 +216,29 @@ def get_file_detail(file_id):
         conn.close()
 
 # ----------------------------------------------------------------------
-# 3) GET /dof/files/{file_id}/download -> Descargar PDF o ZIP (PDF + summary.txt)
-#    Query param opcional: bundle=zip  (por defecto entrega el PDF directo)
+# 3) GET /dof/files/<id>/download -> descarga SIEMPRE el PDF local/URL
 # ----------------------------------------------------------------------
 @app.route("/dof/files/<int:file_id>/download", methods=["GET"])
 def download_file(file_id):
-    bundle = request.args.get("bundle", "pdf").lower().strip()  # 'pdf' | 'zip'
-
     conn = get_db_connection()
     if not conn:
         return jsonify({"message": "Error de conexión a la base de datos"}), 500
     cursor = conn.cursor(dictionary=True)
 
     try:
-        # Traemos info del file + publicación, usando public_url (no download_uri)
         cursor.execute(
             """
             SELECT
                 f.id,
                 f.publication_id,
                 f.storage_uri,
-                f.public_url,              -- <--- aquí usamos public_url
+                f.public_url,
                 f.mime,
-                p.dof_date,
+                /* nombre base con fecha derivada del filename */
+                DATE_FORMAT(
+                  STR_TO_DATE(SUBSTRING_INDEX(f.storage_uri, '-', 1), '%d%m%Y'),
+                  '%Y-%m-%d'
+                ) AS dof_date_fmt,
                 p.type AS publication_type
             FROM files f
             JOIN publications p ON f.publication_id = p.id
@@ -225,60 +250,26 @@ def download_file(file_id):
         if not frow:
             return jsonify({"message": "Archivo DOF no encontrado"}), 404
 
-        # Intentamos obtener el PDF; si hay public_url http(s), se usa primero
-        try:
-            pdf_bytes = _fetch_pdf_bytes(frow["storage_uri"], frow.get("public_url"))
-        except NotImplementedError as nie:
-            return jsonify({"message": str(nie)}), 501
-        except Exception as e:
-            return jsonify({"message": f"No se pudo obtener el PDF: {e}"}), 502
+        pdf_bytes = _fetch_pdf_bytes(frow["storage_uri"], frow.get("public_url"))
 
-        # Nombre base para el archivo
-        base_name = f"DOF_{frow['dof_date']}_{frow['publication_type']}_file{frow['id']}"
-        base_name = _safe_filename(base_name)
-
-        if bundle == "zip":
-            # Conseguimos resumen si existe
-            cursor.execute(
-                """
-                SELECT summary_text
-                FROM summaries
-                WHERE object_type = 'publication'
-                  AND object_id = %s
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                (frow["publication_id"],),
-            )
-            srow = cursor.fetchone()
-            summary_text = srow["summary_text"] if srow else "Sin resumen disponible."
-
-            # Empaquetamos ZIP en memoria: document.pdf + summary.txt
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                zf.writestr("document.pdf", pdf_bytes)
-                zf.writestr("summary.txt", summary_text)
-            zip_buffer.seek(0)
-
-            return send_file(
-                zip_buffer,
-                mimetype="application/zip",
-                as_attachment=True,
-                download_name=f"{base_name}.zip",
-            )
-
-        # Por defecto: PDF directo
-        pdf_buffer = io.BytesIO(pdf_bytes)
-        pdf_buffer.seek(0)
+        base_name = _safe_filename(
+            f"DOF_{frow['dof_date_fmt']}_{frow['publication_type']}_file{frow['id']}"
+        )
+        buf = io.BytesIO(pdf_bytes)
+        buf.seek(0)
         mimetype = frow["mime"] or "application/pdf"
         return send_file(
-            pdf_buffer,
+            buf,
             mimetype=mimetype,
             as_attachment=True,
             download_name=f"{base_name}.pdf",
         )
 
-    except mysql.connector.Error as err:
+    except FileNotFoundError as fe:
+        return jsonify({"message": str(fe)}), 404
+    except requests.HTTPError as he:
+        return jsonify({"message": f"HTTP error al descargar PDF: {he}"}), 502
+    except Exception as err:
         return jsonify({"message": f"Error al preparar descarga: {err}"}), 500
     finally:
         cursor.close()
@@ -289,4 +280,5 @@ def download_file(file_id):
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
     print("Servidor Flask iniciado. Accede a http://127.0.0.1:8000")
-    app.run(port=8000, debug=True)
+    # Para Codespaces, escucha en 0.0.0.0
+    app.run(host="0.0.0.0", port=8000, debug=True)
