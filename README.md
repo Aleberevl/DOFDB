@@ -1,58 +1,70 @@
 # BACKEND DOF – API Flask + MySQL (dofdb)
 
-Este proyecto expone una **API REST en Flask** conectada a MySQL (`dofdb`) para tres casos de uso:
-
-1) **Recuperar archivos DOF (últimas 5 publicaciones)**  
-   - **GET** `/dof/files`  
-   - Lista de archivos con metadatos de su publicación.
-
-2) **Visualizar archivo completo**  
-   - **GET** `/dof/files/{file_id}`  
-   - Metadatos del archivo + sus páginas (`pages`) + resumen más reciente si existe (`summaries`).
-
-3) **Descargar PDF o ZIP (PDF + resumen)**  
-   - **GET** `/dof/files/{file_id}/download`  
-   - Parámetro opcional: `bundle=zip` para recibir un `.zip` con `document.pdf` y `summary.txt`.  
-   - La descarga resuelve primero `files.public_url` (si es `http(s)`), luego intenta `files.storage_uri` (ruta local). Si `storage_uri` es `s3://` debes proporcionar una URL pública/presignada en `public_url`.
-
-La API sigue la especificación funcional definida en `api-dof-files.yaml` y está pensada para integrarse con pipelines de ingestión/OCR y NLP.
+Este proyecto expone una **API REST en Flask** conectada a MySQL (`dofdb`) para trabajar con PDFs del Diario Oficial de la Federación (DOF) **que ya tienes en tu carpeta local del repo `DOF_PDF/`**.
 
 ---
 
-## 1) Requisitos
+## Endpoints
 
-- Python 3.x  
-- Docker (para MySQL en contenedor)  
-- Librerías de Python:
-  ```bash
-  pip install mysql-connector-python flask flask-cors requests
-  ```
+1) **Listar últimas 5 entradas**
+   - **GET** `/dof/files`
+   - Devuelve: `[ { id, publication_id, storage_uri, mime, bytes, sha256, has_ocr, pages_count, publication_date, publication_type, source_url }, ... ]`
+   - **Nota:** `publication_date` se **deriva del nombre del archivo** (por ejemplo, `04112025-MAT.pdf` → `2025-11-04`). No depende de `publications.dof_date`.
+
+2) **Detalle de un archivo**
+   - **GET** `/dof/files/<file_id>`
+   - Devuelve: metadatos del archivo + `pages` (si existen en tabla) + `summary` (si existe en `summaries`).
+
+3) **Descargar PDF (solo PDF)**
+   - **GET** `/dof/files/<file_id>/download`
+   - Entrega el **PDF original** desde tu carpeta local `DOF_PDF/` (o desde `public_url` si está seteado como http/https). **No** incluye resumen.
+
+4) **Recalcular páginas (contador automático)**
+   - **POST** `/admin/reindex_pages`
+   - Recorre la carpeta `DOF_PDF/`, lee cada PDF y actualiza `files.pages_count` usando `PyPDF2` (requiere tener `storage_uri` que coincida con el nombre de archivo).
 
 ---
 
-## 2) Levantar MySQL en Codespaces (o local con Docker)
+## Estructura esperada del repo
 
-1. **Crear/arrancar contenedor MySQL (puerto 3306):**
-   ```bash
-   docker run --name mysql-container -e MYSQL_ROOT_PASSWORD=contrasena -p 3306:3306 -d mysql:latest
-   ```
+```
+.
+├─ app.py
+├─ DOF_PDF/
+│  ├─ 04112025-MAT.pdf
+│  ├─ 05112025-MAT.pdf
+│  ├─ 06112025-MAT.pdf
+│  ├─ 07112025-MAT.pdf
+│  └─ 10112025-MAT.pdf
+├─ tools/
+│  └─ reindex_pages.py
+├─ dofdb_estructura.sql
+└─ requirements.txt  (flask, flask-cors, mysql-connector-python, PyPDF2)
+```
 
-2. **Crear la base `dofdb` y cargar la estructura (archivo seguro):**
-   - Guarda el dump **SAFE** como `dofdb_estructura.sql` (el que incluye `public_url` en `files` y evita SETs problemáticos).
-   - Ejecuta:
-   ```bash
-   # Crea la base si no existe
-   docker exec -i mysql-container mysql -u root -pcontrasena -e "CREATE DATABASE IF NOT EXISTS dofdb;"
-   # Carga la estructura (CREATE TABLE ...)
-   docker exec -i mysql-container mysql -u root -pcontrasena dofdb < dofdb_estructura.sql
-   ```
+> **Importante**: Los nombres de los PDFs en `DOF_PDF/` deben coincidir con `files.storage_uri`.
 
-3. **(Opcional) Entrar a MySQL interactivo:**
-   ```bash
-   docker exec -it mysql-container mysql -u root -pcontrasena
-   ```
+---
 
-> **DB_CONFIG** en `app.py` debe tener la misma contraseña/host/puerto:
+## MySQL con Docker (Codespaces o local)
+
+1) Crear/arrancar MySQL (puerto 3306):
+```bash
+docker run --name mysql-container -e MYSQL_ROOT_PASSWORD=contrasena -p 3306:3306 -d mysql:latest
+```
+
+2) Crear la base y cargar el esquema seguro:
+```bash
+docker exec -i mysql-container mysql -u root -pcontrasena -e "CREATE DATABASE IF NOT EXISTS dofdb;"
+docker exec -i mysql-container mysql -u root -pcontrasena dofdb < dofdb_estructura.sql
+```
+
+3) (Opcional) abrir consola MySQL:
+```bash
+docker exec -it mysql-container mysql -u root -pcontrasena
+```
+
+**DB_CONFIG esperado en `app.py`:**
 ```python
 DB_CONFIG = {
     "host": "127.0.0.1",
@@ -65,97 +77,96 @@ DB_CONFIG = {
 
 ---
 
-## 3) Insertar datos de ejemplo (mínimos para probar los 3 endpoints)
+## Seed de datos (ejemplo real con tus 5 PDFs)
 
-**Importante:** Para probar `/download`, usa **una URL pública** en `public_url` o un **PDF local existente** en `storage_uri`.
+> Asegúrate de que *ya existen* los 5 PDFs en `DOF_PDF/` con exactamente estos nombres.
 
-### Opción A — Usar una URL pública (rápido)
 ```sql
 USE dofdb;
 
-INSERT INTO publications (id, dof_date, issue_number, type, source_url, status)
-VALUES (1,'2025-11-06','10','DOF','https://dof.gob.mx/nota_detalle.php?codigo=1234567','parsed')
-ON DUPLICATE KEY UPDATE dof_date=VALUES(dof_date);
+INSERT INTO publications (id, dof_date, issue_number, type, source_url, status) VALUES
+(20251104, '2025-11-04', 'MAT', 'DOF', 'https://www.dof.gob.mx/index.php?year=2025&month=11&day=04&edicion=MAT#gsc.tab=0', 'parsed'),
+(20251105, '2025-11-05', 'MAT', 'DOF', 'https://www.dof.gob.mx/index.php?year=2025&month=11&day=05&edicion=MAT#gsc.tab=0', 'parsed'),
+(20251106, '2025-11-06', 'MAT', 'DOF', 'https://www.dof.gob.mx/index_113.php?year=2025&month=11&day=06#gsc.tab=0', 'parsed'),
+(20251107, '2025-11-07', 'MAT', 'DOF', 'https://www.dof.gob.mx/index.php?year=2025&month=11&day=07&edicion=MAT#gsc.tab=0', 'parsed'),
+(20251110, '2025-11-10', 'MAT', 'DOF', 'https://www.dof.gob.mx/index.php?year=2025&month=11&day=10&edicion=MAT#gsc.tab=0', 'parsed')
+ON DUPLICATE KEY UPDATE dof_date=VALUES(dof_date), source_url=VALUES(source_url);
 
-INSERT INTO files (id, publication_id, storage_uri, public_url, mime, bytes, sha256, has_ocr, pages_count)
-VALUES (
-  1, 1,
-  's3://dof-storage/2025-11-06/001.pdf',
-  'https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf',
-  'application/pdf', 2048000, 'a2b8e8c9d1f34b8d7e42e6c8f77f74a1b2aaaaaa', 1, 2
-)
-ON DUPLICATE KEY UPDATE publication_id=VALUES(publication_id);
-
-INSERT INTO pages (file_id, page_no, text, image_uri) VALUES
-(1,1,'Texto extraído de la primera página...','https://s3.amazonaws.com/dof-storage/2025-11-06/page1.png'),
-(1,2,'Texto extraído de la segunda página...','https://s3.amazonaws.com/dof-storage/2025-11-06/page2.png')
-ON DUPLICATE KEY UPDATE text=VALUES(text);
-
-INSERT INTO summaries (object_type, object_id, model, summary_text, confidence)
-VALUES ('publication',1,'gpt-5','Resumen del decreto: principales incentivos fiscales para PYMES.',0.95);
-```
-
-### Opción B — Usar un PDF local
-1. Copia un PDF al workspace (ej. `./data/ejemplo.pdf`).  
-2. Actualiza la fila:
-```sql
-UPDATE files
-SET public_url = NULL,
-    storage_uri = '/workspaces/DOFDB_ac/data/ejemplo.pdf'
-WHERE id = 1;
+INSERT INTO files (id, publication_id, storage_uri, public_url, mime, bytes, sha256, has_ocr, pages_count) VALUES
+(2001, 20251104, '04112025-MAT.pdf', NULL, 'application/pdf', NULL, NULL, 0, 0),
+(2002, 20251105, '05112025-MAT.pdf', NULL, 'application/pdf', NULL, NULL, 0, 0),
+(2003, 20251106, '06112025-MAT.pdf', NULL, 'application/pdf', NULL, NULL, 0, 0),
+(2004, 20251107, '07112025-MAT.pdf', NULL, 'application/pdf', NULL, NULL, 0, 0),
+(2005, 20251110, '10112025-MAT.pdf', NULL, 'application/pdf', NULL, NULL, 0, 0)
+ON DUPLICATE KEY UPDATE storage_uri=VALUES(storage_uri), publication_id=VALUES(publication_id), mime=VALUES(mime);
 ```
 
 ---
 
-## 4) Ejecutar la API (Flask)
+## Ejecutar el API
 
-En tu Codespace/terminal del repo:
+Instala dependencias y arranca:
 
 ```bash
-pip install mysql-connector-python flask flask-cors requests
+pip install flask flask-cors mysql-connector-python PyPDF2
 python app.py
 ```
 
-- En Codespaces se abrirá la **Port 8000**. Pulsa **Open in Browser** cuando aparezca la notificación.  
-- Localmente, ve a: <http://127.0.0.1:8000>
+- **Local:** navega a <http://127.0.0.1:8000>
+- **Codespaces:** usa la URL publicada del puerto 8000, por ejemplo  
+  `https://<tu-alias>-8000.app.github.dev/`
 
 ---
 
-## 5) Probar los 3 endpoints (con `curl`)
+## Probar Endpoints
 
-> Si usas navegador, basta con abrir las URLs. Con `curl`, además puedes guardar archivos.
+> Reemplaza `<TU-URL>` por tu dominio de Codespaces o usa `http://127.0.0.1:8000` si estás local.
 
-### 5.1) Últimas 5 publicaciones (lista)
+- **Listado (últimas 5):**  
+  `<TU-URL>/dof/files`
+
+- **Detalle de un archivo (ej. 2003):**  
+  `<TU-URL>/dof/files/2003`
+
+- **Descargar PDF (ej. 2003):**  
+  `<TU-URL>/dof/files/2003/download`
+
+- **Recalcular páginas:**  
+  `POST <TU-URL>/admin/reindex_pages`
+
+Ejemplos con `curl`:
+
 ```bash
-curl -s http://127.0.0.1:8000/dof/files | python -m json.tool
+curl -fsS <TU-URL>/dof/files | python -m json.tool
+curl -fsS <TU-URL>/dof/files/2003 | python -m json.tool
+curl -fSLOJ "<TU-URL>/dof/files/2003/download"
+curl -fsS -X POST "<TU-URL>/admin/reindex_pages" | python -m json.tool
 ```
-
-### 5.2) Detalle de un archivo (metadatos + páginas + summary)
-```bash
-curl -s http://127.0.0.1:8000/dof/files/1 | python -m json.tool
-```
-
-### 5.3) Descargar PDF (por defecto) o ZIP (PDF + summary.txt)
-
-- **PDF directo:**
-```bash
-curl -L -o dof_1.pdf "http://127.0.0.1:8000/dof/files/1/download"
-```
-
-- **ZIP con PDF + resumen:**
-```bash
-curl -L -o dof_1_bundle.zip "http://127.0.0.1:8000/dof/files/1/download?bundle=zip"
-```
-
-> Si obtienes un ZIP vacío o error, revisa que `public_url` sea una URL `http(s)` válida **o** que `storage_uri` apunte a un PDF **existente** y legible desde el servidor.
 
 ---
 
-## 6) Notas finales y buenas prácticas
+## Reindexar páginas (contar páginas de PDFs locales)
 
-- `public_url` simplifica la descarga (ideal con pre-signed URLs). Si sólo usas `s3://...`, el backend necesita una URL pública o presignada.  
-- Para producción, agrega autenticación, logging y maneja límites/paginación en `/dof/files`.  
-- Índices útiles ya incluidos: `idx_publications_dof_date`, `idx_files_pub_date`, `uq_pages_file_page`.
+El script **`tools/reindex_pages.py`** actualiza `files.pages_count` leyendo los PDFs dentro de `DOF_PDF/`.
+
+Ejecutar (desde la raíz del repo):
+```bash
+python tools/reindex_pages.py
+```
+
+Si necesitas instalar dependencias:
+```bash
+pip install PyPDF2 mysql-connector-python
+python tools/reindex_pages.py
+```
 
 ---
 
+## Notas y resolución de problemas
+
+- Si `/dof/files` sale vacío, revisa que insertaste filas en `files` y que `publication_id` exista.
+- Si `/dof/files/<id>/download` da 404, valida que:
+  - `files.storage_uri` exista físicamente como `DOF_PDF/<storage_uri>`,
+  - el nombre coincide exactamente (incluyendo mayúsculas/minúsculas).
+- Si `pages_count` = 0, ejecuta `POST /admin/reindex_pages` **o** `python tools/reindex_pages.py` para contar páginas reales.
+- `publication_date` del listado **siempre** se deriva del nombre del PDF (`DDMMYYYY`).
