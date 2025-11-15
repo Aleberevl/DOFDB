@@ -1,14 +1,16 @@
 # app.py
 # Ejecuta con: python app.py
 # Requiere:
-#   pip install mysql-connector-python flask flask-cors requests
+#   pip install mysql-connector-python flask flask-cors requests PyPDF2
 
 import io
 import os
+import glob
 import requests
 import mysql.connector
-from flask import Flask, jsonify, send_file
+from flask import Flask, jsonify, send_file, request
 from flask_cors import CORS
+from PyPDF2 import PdfReader
 
 app = Flask(__name__)
 CORS(app)
@@ -102,8 +104,13 @@ def root():
         "endpoints": [
             "GET /dof/files",
             "GET /dof/files/<file_id>",
-            "GET /dof/files/<file_id>/download"
-        ]
+            "GET /dof/files/<file_id>/download",
+            "POST /admin/reindex_pages"
+        ],
+        "notes": {
+            "publication_date": "Se deriva del nombre del PDF (DDMMYYYY-*.pdf)",
+            "download": "Entrega solo el PDF; no incluye summary"
+        }
     })
 
 # ----------------------------------------------------------------------
@@ -271,6 +278,43 @@ def download_file(file_id):
         return jsonify({"message": f"HTTP error al descargar PDF: {he}"}), 502
     except Exception as err:
         return jsonify({"message": f"Error al preparar descarga: {err}"}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+# ----------------------------------------------------------------------
+# 4) POST /admin/reindex_pages -> recalcula pages_count leyendo DOF_PDF/*
+# ----------------------------------------------------------------------
+@app.route("/admin/reindex_pages", methods=["POST"])
+def reindex_pages():
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"message": "Error de conexión a la base de datos"}), 500
+    cursor = conn.cursor()
+
+    folder = os.path.join(PROJECT_ROOT, BASE_PDF_DIR)
+    pdfs = glob.glob(os.path.join(folder, "*.pdf"))
+
+    updated = {}
+    try:
+        for path in pdfs:
+            fname = os.path.basename(path)
+            try:
+                n_pages = len(PdfReader(path).pages)
+            except Exception:
+                n_pages = 0
+
+            cursor.execute(
+                "UPDATE files SET pages_count=%s WHERE storage_uri=%s",
+                (n_pages, fname),
+            )
+            updated[fname] = n_pages
+
+        conn.commit()
+        return jsonify({"updated": updated, "count": len(updated)}), 200
+    except mysql.connector.Error as err:
+        conn.rollback()
+        return jsonify({"message": f"Error al actualizar pages_count: {err}"}), 500
     finally:
         cursor.close()
         conn.close()
