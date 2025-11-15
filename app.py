@@ -200,6 +200,50 @@ def delete_summary(summary_id):
         cursor.close()
         conn.close()
 
+# ------------------------------------------------------
+# 5. READ (GET) - compartir summary + link oficial
+@app.get("/summaries/{summary_id}/share")
+def share_summary(summary_id: int):
+    # 1) Obtener summary
+    summary = db.execute("""
+        SELECT 
+            s.id,
+            s.summary_text,
+            s.object_type,
+            s.object_id
+        FROM summaries s
+        WHERE s.id = :sid
+    """, {"sid": summary_id}).fetchone()
+
+    if summary is None:
+        raise HTTPException(status_code=404, detail="Summary not found")
+
+    # 2) Obtener el link oficial (publications.source_url)
+    source_url = db.execute("""
+        SELECT 
+            COALESCE(p.source_url, p2.source_url, p3.source_url) AS source_url
+        FROM summaries s
+        LEFT JOIN publications p 
+            ON (s.object_type = 'publication' AND s.object_id = p.id)
+        LEFT JOIN sections sec 
+            ON (s.object_type = 'section' AND s.object_id = sec.id)
+        LEFT JOIN publications p2
+            ON sec.publication_id = p2.id
+        LEFT JOIN items i
+            ON (s.object_type = 'item' AND s.object_id = i.id)
+        LEFT JOIN sections sec2
+            ON i.section_id = sec2.id
+        LEFT JOIN publications p3
+            ON sec2.publication_id = p3.id
+        WHERE s.id = :sid
+    """, {"sid": summary_id}).fetchone()
+
+    return {
+        "summary_id": summary.id,
+        "summary_text": summary.summary_text,
+        "source_url": source_url.source_url
+    }
+
 # ----------------------------------------------------------------------
 # Inicialización de la Aplicación
 # ----------------------------------------------------------------------
