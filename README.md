@@ -23,6 +23,27 @@ Este proyecto expone una **API REST en Flask** conectada a MySQL (`dofdb`) para 
    - **POST** `/admin/reindex_pages`
    - Recorre la carpeta `DOF_PDF/`, lee cada PDF y actualiza `files.pages_count` usando `PyPDF2` (requiere tener `storage_uri` que coincida con el nombre de archivo).
 
+5) **Listar publicaciones (con archivo asociado)**  
+   - **GET** `/dof/publications/`  
+   - Devuelve publicaciones recientes (fecha, tipo, estado) y el `file_id/pages_count` si existe.
+
+6) **Detalle estructurado de publicación**  
+   - **GET** `/dof/publications/<pub_id>`  
+   - Devuelve publicación + archivo + **secciones**, **ítems** y **entidades**; además `pages` de ese archivo (si hay filas en `pages`).
+
+7) **Summaries – CRUD (unificado)**
+   - **Crear:** **POST** `/summaries`  
+     Requiere: `object_type` (`publication|section|item|chunk`), `object_id`, `model`, `summary_text`, `confidence`.
+   - **Listar:** **GET** `/summaries`
+   - **Detalle:** **GET** `/summaries/<summary_id>`
+   - **Actualizar (parcial):** **PUT** `/summaries/<summary_id>`
+   - **Eliminar:** **DELETE** `/summaries/<summary_id>`
+   - Requiere para crear: `object_type`, `object_id`, `model`, `summary_text`, `confidence`.
+
+8) **Summaries – Share (texto + link oficial)**
+   - **GET** `/summaries/<summary_id>/share`
+   - Devuelve el `summary_text` y resuelve el `source_url` oficial de la publicación asociada (subiendo por `section`/`item` si aplica). Para `chunk` puede ser `null`.
+
 ---
 
 ## Estructura esperada del repo
@@ -39,7 +60,7 @@ Este proyecto expone una **API REST en Flask** conectada a MySQL (`dofdb`) para 
 ├─ tools/
 │  └─ reindex_pages.py
 ├─ dofdb_estructura.sql
-└─ requirements.txt  (flask, flask-cors, mysql-connector-python, PyPDF2)
+
 ```
 
 > **Importante**: Los nombres de los PDFs en `DOF_PDF/` deben coincidir con `files.storage_uri`.
@@ -51,6 +72,11 @@ Este proyecto expone una **API REST en Flask** conectada a MySQL (`dofdb`) para 
 1) Crear/arrancar MySQL (puerto 3306):
 ```bash
 docker run --name mysql-container -e MYSQL_ROOT_PASSWORD=contrasena -p 3306:3306 -d mysql:latest
+```
+
+2) Iniciar contenedor si ya esta creado pero detenido
+```bash
+docker start mysql-container
 ```
 
 2) Crear la base y cargar el esquema seguro:
@@ -118,33 +144,6 @@ python app.py
 
 ---
 
-## Probar Endpoints
-
-> Reemplaza `<TU-URL>` por tu dominio de Codespaces o usa `http://127.0.0.1:8000` si estás local.
-
-- **Listado (últimas 5):**  
-  `<TU-URL>/dof/files`
-
-- **Detalle de un archivo (ej. 2003):**  
-  `<TU-URL>/dof/files/2003`
-
-- **Descargar PDF (ej. 2003):**  
-  `<TU-URL>/dof/files/2003/download`
-
-- **Recalcular páginas:**  
-  `POST <TU-URL>/admin/reindex_pages`
-
-Ejemplos con `curl`:
-
-```bash
-curl -fsS <TU-URL>/dof/files | python -m json.tool
-curl -fsS <TU-URL>/dof/files/2003 | python -m json.tool
-curl -fSLOJ "<TU-URL>/dof/files/2003/download"
-curl -fsS -X POST "<TU-URL>/admin/reindex_pages" | python -m json.tool
-```
-
----
-
 ## Reindexar páginas (contar páginas de PDFs locales)
 
 El script **`tools/reindex_pages.py`** actualiza `files.pages_count` leyendo los PDFs dentro de `DOF_PDF/`.
@@ -162,6 +161,42 @@ python tools/reindex_pages.py
 
 ---
 
+## Probar Endpoints
+
+> Reemplaza `<TU-URL>` por tu dominio de Codespaces si se corre en el navegador (hacerlo público para descargar archivo en equipo) o usa `http://127.0.0.1:8000` si estás local.
+
+- **Listado (últimas 5):**  
+  `<TU-URL>/dof/files`
+
+- **Detalle de un archivo (ej. 2003):**  
+  `<TU-URL>/dof/files/2003`
+
+- **Descargar PDF (ej. 2003):**  
+  `<TU-URL>/dof/files/2003/download`
+
+- **Recalcular páginas:**  
+  `POST <TU-URL>/admin/reindex_pages`
+
+- **Listar publicaciones con archivo asociado (ej. 20251106):**  
+  `<TU-URL>/dof/publications/20251106`
+
+- **Compartir Summary (texto + link oficial, ej. 1):**  
+  `<TU-URL>/summaries/1/share`  
+
+
+Ejemplos con `curl`:
+
+```bash
+curl -fsS <TU-URL>/dof/files | python -m json.tool
+curl -fsS <TU-URL>/dof/files/2003 | python -m json.tool
+curl -fSLOJ "<TU-URL>/dof/files/2003/download"
+curl -fsS -X POST "<TU-URL>/admin/reindex_pages" | python -m json.tool
+curl -fsS <TU-URL>/summaries/1/share | python -m json.tool
+
+```
+
+---
+
 ## Notas y resolución de problemas
 
 - Si `/dof/files` sale vacío, revisa que insertaste filas en `files` y que `publication_id` exista.
@@ -170,3 +205,8 @@ python tools/reindex_pages.py
   - el nombre coincide exactamente (incluyendo mayúsculas/minúsculas).
 - Si `pages_count` = 0, ejecuta `POST /admin/reindex_pages` **o** `python tools/reindex_pages.py` para contar páginas reales.
 - `publication_date` del listado **siempre** se deriva del nombre del PDF (`DDMMYYYY`).
+- `GET /dof/publications/<pub_id>` 
+  - `pages` vendrá vacío si no has materializado filas en la tabla pages. El total de páginas se refleja en `file.pages_count`
+- `Summaries`:
+  - `object_type` debe ser uno de: `publication`, `section`, `item`, `chunk`
+  - Si `share` devuelve `source_url: null`, revisa que el objeto tenga ruta hacia `publications` (para `chunk` puede no existir)
